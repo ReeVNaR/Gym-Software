@@ -39,3 +39,68 @@ body {
 @utility neon-glow {
   box-shadow: 0 0 10px rgba(207, 245, 50, 0.5), 0 0 20px rgba(207, 245, 50, 0.3);
 }
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+/* Custom Scrollbar Styles */
+/* Global Scrollbar Styles for PC */
+@media (min-width: 768px) {
+
+  /* Apply to ALL scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    /* Slightly wider than 4px for general usability */
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    /* Almost invisible by default */
+    border-radius: 10px;
+    transition: background 0.2s ease;
+  }
+
+  /* When hovering over ANY scrollable element, make scrollbar prominent */
+  *:hover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  /* When dragging */
+  ::-webkit-scrollbar-thumb:active {
+    background: #cff532 !important;
+    /* Primary color */
+  }
+
+  /* Exceptions or helpers */
+  .custom-scrollbar-x::-webkit-scrollbar {
+    height: 8px;
+  }
+}
+
+/* Hide scrollbar for cleaner look but allow scroll */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

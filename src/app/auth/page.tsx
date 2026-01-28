@@ -2,13 +2,23 @@
 
 import { motion } from "framer-motion";
 import { Dumbbell, ArrowRight } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
 import { supabase } from "@/lib/supabase";
 
-export default function AuthPage() {
+export default function AuthPageWrapper() {
+    return (
+        <Suspense fallback={<div>Loading...</div>}>
+            <AuthPage />
+        </Suspense>
+    );
+}
+
+function AuthPage() {
     const [isLogin, setIsLogin] = useState(false);
     const router = useRouter();
+    const searchParams = useSearchParams();
+    const urlPlan = searchParams.get('plan');
 
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -39,7 +49,7 @@ export default function AuthPage() {
                     .select("*")
                     .eq("email", email)
                     .eq("password", password)
-                    .single();
+                    .maybeSingle();
 
                 if (error || !data) {
                     setError("Invalid email or password.");
@@ -66,8 +76,10 @@ export default function AuthPage() {
                             // Actually I didn't add phone column. Let's skip phone in DB insert for now or add it.
                             // I'll skip phone in DB insert to avoid error, or just use it if I update DB.
                             // To be safe I will just insert strict columns: full_name, email, password, plan, status
-                            plan: 'Basic', // Default plan
-                            status: 'Pending'
+                            // To be safe I will just insert strict columns: full_name, email, password, plan, status, due_amount
+                            plan: urlPlan || 'Monthly Plan', // Default plan
+                            status: 'Pending',
+                            due_amount: (urlPlan === 'Yearly Plan') ? 20000 : (urlPlan === '6-Month Plan') ? 12000 : 3000
                         }
                     ]);
 

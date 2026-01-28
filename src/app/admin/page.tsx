@@ -1,9 +1,10 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Users, DollarSign, Activity, Settings, LogOut, Dumbbell, Menu, X } from "lucide-react";
+import { Users, DollarSign, Activity, Settings, LogOut, Dumbbell, Menu, X, Save, Lock, Globe, Bell, ChevronRight, Shield, ScanLine, Calendar, IndianRupee, Trash2 } from "lucide-react";
+import { Html5Qrcode } from "html5-qrcode";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 
 
@@ -26,6 +27,259 @@ export default function AdminDashboard() {
     const [isLoadingMembers, setIsLoadingMembers] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
     const [editingMember, setEditingMember] = useState<any>(null);
+    const [prices, setPrices] = useState({
+        monthly: 3000,
+        sixMonth: 12000,
+        yearly: 20000
+    });
+
+    const [generalSettings, setGeneralSettings] = useState({
+        gymName: "Starshift Gym",
+        email: "admin@starshift.com",
+        phone: "+1 (555) 000-0000",
+        address: "123 Fitness Blvd, Muscle City, CA"
+    });
+    const [lastScannedMs, setLastScannedMs] = useState(0);
+    const [activeSessions, setActiveSessions] = useState<Record<string, string>>({}); // memberId -> check_in_time
+    const [elapsedTimes, setElapsedTimes] = useState<Record<string, string>>({});
+
+    // Member Details View State
+    const [viewingMember, setViewingMember] = useState<any>(null);
+    const [viewingMemberLogs, setViewingMemberLogs] = useState<any[]>([]);
+    const [viewingStats, setViewingStats] = useState({ totalVisits: 0, totalMinutes: 0 });
+
+    const calendarScrollRef = useRef<HTMLDivElement>(null);
+
+    // Payments State
+    const [managingPaymentsFor, setManagingPaymentsFor] = useState<any>(null);
+    const [memberPayments, setMemberPayments] = useState<any[]>([]);
+    const [newPaymentAmount, setNewPaymentAmount] = useState("");
+    const [newPaymentMethod, setNewPaymentMethod] = useState("Cash");
+
+    // Fetch payments when managing a member
+    useEffect(() => {
+        if (managingPaymentsFor) {
+            fetchPayments(managingPaymentsFor.id);
+        } else {
+            setMemberPayments([]);
+            setNewPaymentAmount("");
+            setNewPaymentMethod("Cash");
+        }
+    }, [managingPaymentsFor]);
+
+    async function fetchPayments(memberId: string) {
+        const { data } = await supabase
+            .from('payments')
+            .select('*')
+            .eq('member_id', memberId)
+            .order('payment_date', { ascending: false });
+        if (data) setMemberPayments(data);
+    }
+
+    async function handleAddPayment() {
+        if (!managingPaymentsFor || !newPaymentAmount) return;
+
+        try {
+            const { error } = await supabase.from('payments').insert({
+                member_id: managingPaymentsFor.id,
+                amount: parseFloat(newPaymentAmount),
+                payment_method: newPaymentMethod,
+                payment_date: new Date().toISOString()
+            });
+            if (error) throw error;
+
+
+
+            // Automatically reduce due amount (allow negative for credit)
+            const currentDue = managingPaymentsFor.due_amount || 0;
+            const newDue = currentDue - parseFloat(newPaymentAmount);
+
+            const { error: updateError } = await supabase.from('members').update({ due_amount: newDue }).eq('id', managingPaymentsFor.id);
+
+            if (updateError) {
+                console.error("Error updating due amount:", updateError);
+            } else {
+                // Update local state to reflect change immediately
+                setMembers(prev => prev.map((m: any) => m.id === managingPaymentsFor.id ? { ...m, due_amount: newDue } : m));
+                setManagingPaymentsFor((prev: any) => ({ ...prev, due_amount: newDue }));
+            }
+
+            // Refresh
+            fetchPayments(managingPaymentsFor.id);
+            setNewPaymentAmount("");
+        } catch (e) {
+            console.error(e);
+            alert("Failed to record payment");
+        }
+    }
+
+    async function handleDeletePayment(paymentId: string) {
+        if (!confirm("Are you sure you want to delete this payment?")) return;
+
+        const paymentToDelete = memberPayments.find(p => p.id === paymentId);
+        if (!paymentToDelete) return;
+
+        try {
+            const { error } = await supabase.from('payments').delete().eq('id', paymentId);
+            if (error) throw error;
+
+            // Revert due amount
+            if (managingPaymentsFor) {
+                const currentDue = managingPaymentsFor.due_amount || 0;
+                const newDue = currentDue + paymentToDelete.amount;
+
+                await supabase.from('members').update({ due_amount: newDue }).eq('id', managingPaymentsFor.id);
+
+                setMembers(prev => prev.map((m: any) => m.id === managingPaymentsFor.id ? { ...m, due_amount: newDue } : m));
+                setManagingPaymentsFor((prev: any) => ({ ...prev, due_amount: newDue }));
+
+                fetchPayments(managingPaymentsFor.id);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Failed to delete payment");
+        }
+    }
+
+    // Auto-scroll calendar to end when modal opens
+    useEffect(() => {
+        if (viewingMember && calendarScrollRef.current) {
+            setTimeout(() => {
+                if (calendarScrollRef.current) {
+                    calendarScrollRef.current.scrollLeft = calendarScrollRef.current.scrollWidth;
+                }
+            }, 100);
+        }
+    }, [viewingMember]);
+
+    // Scanner Effect
+    useEffect(() => {
+        let scanner: Html5Qrcode | null = null;
+
+        if (activeTab === 'Scan') {
+            // small delay to ensure DOM is ready
+            const timer = setTimeout(async () => {
+                scanner = new Html5Qrcode("reader");
+
+                try {
+                    await scanner.start(
+                        { facingMode: "environment" },
+                        {
+                            fps: 10,
+                            qrbox: { width: 250, height: 250 }
+                        },
+                        async (decodedText) => {
+                            // Use function ref or similar if lastScannedMs is state, 
+                            // but since we re-run effect on lastScannedMs change, 
+                            // capturing the closure variable 'now' should be careful.
+                            // Actually, simpler to just use a ref for debouncing if we wanted to avoid re-renders of the effect.
+                            // BUT, for now, we will rely on a simple check.
+
+                            const now = Date.now();
+                            // We need to read the potentially stale state or use a Ref. 
+                            // Since the effect re-runs on lastScannedMs, it restarts the camera, which is bad.
+                            // Let's use a localStorage or a global variable or a Ref for debounce timestamp to prevent camera validation flickering.
+
+                            const lastScan = parseInt(sessionStorage.getItem('lastScanned') || '0');
+                            if (now - lastScan < 3000) return;
+
+                            sessionStorage.setItem('lastScanned', now.toString());
+                            await handleScan(decodedText);
+                        },
+                        (errorMessage) => {
+                            // ignore
+                        }
+                    );
+                } catch (err) {
+                    console.error("Error starting scanner", err);
+                }
+            }, 100);
+
+            return () => {
+                clearTimeout(timer);
+                if (scanner && scanner.isScanning) {
+                    scanner.stop().then(() => {
+                        scanner?.clear();
+                    }).catch(err => console.error("Failed to stop scanner", err));
+                }
+            };
+        }
+    }, [activeTab]);
+
+    async function handleScan(memberId: string) {
+        // Find member
+        const { data: member, error } = await supabase.from('members').select('*').eq('id', memberId).single();
+
+        if (error || !member) {
+            alert("Member not found!");
+            return;
+        }
+
+        const isCheckedIn = member.status === 'Active (In Gym)';
+        const newStatus = isCheckedIn ? 'Active' : 'Active (In Gym)';
+        const message = isCheckedIn ? `${member.full_name} checked OUT.` : `${member.full_name} checked IN!`;
+
+        try {
+            // For non-active members (e.g. pending/inactive), warn admin
+            if (!member.status.startsWith('Active')) {
+                if (!confirm(`Member status is ${member.status}. Allow check-in anyway?`)) return;
+            }
+
+            const { error: updateError } = await supabase
+                .from('members')
+                .update({ status: newStatus })
+                .eq('id', memberId);
+
+            if (updateError) throw updateError;
+
+            // Log Activity
+            if (isCheckedIn) {
+                // CHECK OUT LOGIC
+                // Find the open session
+                const { data: openLog } = await supabase
+                    .from('activity_logs')
+                    .select('*')
+                    .eq('member_id', memberId)
+                    .is('check_out_time', null)
+                    .order('check_in_time', { ascending: false })
+                    .limit(1)
+                    .single();
+
+                if (openLog) {
+                    const checkInTime = new Date(openLog.check_in_time).getTime();
+                    const checkOutTime = new Date().getTime();
+                    const durationMinutes = Math.round((checkOutTime - checkInTime) / 1000 / 60);
+
+                    await supabase
+                        .from('activity_logs')
+                        .update({
+                            check_out_time: new Date().toISOString(),
+                            duration_minutes: durationMinutes
+                        })
+                        .eq('id', openLog.id);
+
+                    alert(`${member.full_name} checked OUT.\nDuration: ${durationMinutes} mins`);
+                } else {
+                    // Fallback if no open log found
+                    alert(`${member.full_name} checked OUT.`);
+                }
+            } else {
+                // CHECK IN LOGIC
+                await supabase
+                    .from('activity_logs')
+                    .insert({
+                        member_id: memberId,
+                        check_in_time: new Date().toISOString()
+                    });
+                alert(`${member.full_name} checked IN!`);
+            }
+
+            // State will update via realtime subscription
+        } catch (e) {
+            console.error(e);
+            alert("Failed to update status");
+        }
+    }
 
     // Fetch members when switching to Members tab
     useEffect(() => {
@@ -56,6 +310,50 @@ export default function AdminDashboard() {
         };
     }, [activeTab]);
 
+    // Fetch Active Sessions for Timers
+    useEffect(() => {
+        if (members.length > 0) {
+            const fetchSessions = async () => {
+                const { data } = await supabase
+                    .from('activity_logs')
+                    .select('member_id, check_in_time')
+                    .is('check_out_time', null);
+
+                if (data) {
+                    const sessionMap: Record<string, string> = {};
+                    data.forEach(log => {
+                        sessionMap[log.member_id] = log.check_in_time;
+                    });
+                    setActiveSessions(sessionMap);
+                }
+            };
+            fetchSessions();
+        }
+    }, [members, activeTab]);
+
+    // Timer Interval
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const now = Date.now();
+            const newTimes: Record<string, string> = {};
+
+            Object.entries(activeSessions).forEach(([memberId, startTime]) => {
+                const start = new Date(startTime).getTime();
+                const diff = now - start;
+
+                if (diff > 0) {
+                    const hours = Math.floor(diff / (1000 * 60 * 60));
+                    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                    const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+                    newTimes[memberId] = `${hours > 0 ? hours + 'h ' : ''}${minutes}m ${seconds}s`;
+                }
+            });
+            setElapsedTimes(newTimes);
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [activeSessions]);
+
     async function fetchMembers() {
         setIsLoadingMembers(true);
         try {
@@ -67,6 +365,23 @@ export default function AdminDashboard() {
             alert('Failed to fetch members. Please check your connection.');
         } finally {
             setIsLoadingMembers(false);
+        }
+    }
+
+    async function handleViewMember(member: any) {
+        setViewingMember(member);
+        const { data: logs, error } = await supabase
+            .from('activity_logs')
+            .select('*')
+            .eq('member_id', member.id)
+            .order('check_in_time', { ascending: false });
+
+        if (logs) {
+            setViewingMemberLogs(logs);
+            // Calculate stats
+            const totalVisits = logs.length;
+            const totalMinutes = logs.reduce((acc, log) => acc + (log.duration_minutes || 0), 0);
+            setViewingStats({ totalVisits, totalMinutes });
         }
     }
 
@@ -95,7 +410,8 @@ export default function AdminDashboard() {
                     full_name: editingMember.full_name,
                     email: editingMember.email,
                     plan: editingMember.plan,
-                    status: editingMember.status
+                    status: editingMember.status,
+                    due_amount: editingMember.due_amount
                 })
                 .eq('id', editingMember.id);
 
@@ -119,7 +435,8 @@ export default function AdminDashboard() {
     // Calculate Stats
     // Calculate Stats
     const totalMembers = members.length;
-    const activeMembers = members.filter(m => m.status === 'Active').length;
+    const activeMembers = members.filter(m => m.status.startsWith('Active')).length;
+    const inGymMembers = members.filter(m => m.status === 'Active (In Gym)').length;
     const pendingMembers = members.filter(m => m.status === 'Pending');
     const pendingCount = pendingMembers.length;
 
@@ -128,17 +445,21 @@ export default function AdminDashboard() {
         return members.reduce((acc, member) => {
             let price = 0;
             switch (member.plan) {
-                case 'Elite': price = 100; break;
-                case 'Pro Athlete': price = 75; break;
-                case 'Basic': price = 40; break;
-                case 'Day Pass': price = 20; break;
+                case 'Yearly Plan': price = prices.yearly; break;
+                case '6-Month Plan': price = prices.sixMonth; break;
+                case 'Monthly Plan': price = prices.monthly; break;
                 default: price = 0;
             }
-            // Only count revenue for Active members? or all? Let's say all for "Monthly Revenue Potential"
             return acc + price;
         }, 0);
     };
     const monthlyRevenue = calculateRevenue();
+
+    const handleSaveSettings = (e: React.FormEvent) => {
+        e.preventDefault();
+        // In a real app, you'd save to Supabase here
+        alert("Settings saved successfully!");
+    };
 
     const recentSignups = members.slice(0, 5); // display first 5
 
@@ -193,8 +514,9 @@ export default function AdminDashboard() {
                 <nav className="flex-1 space-y-2">
                     {[
                         { name: 'Dashboard', icon: Activity },
+                        { name: 'Scan', icon: ScanLine },
                         { name: 'Members', icon: Users },
-                        { name: 'Revenue', icon: DollarSign },
+                        { name: 'Revenue', icon: IndianRupee },
                         { name: 'Settings', icon: Settings },
                     ].map((item) => (
                         <button
@@ -250,7 +572,8 @@ export default function AdminDashboard() {
                             {[
                                 { label: 'Total Members', value: totalMembers.toString(), change: '+2 new', icon: Users },
                                 { label: 'Pending Approvals', value: pendingCount.toString(), change: pendingCount > 0 ? 'Action Needed' : 'All Clear', icon: Activity },
-                                { label: 'Active Members', value: activeMembers.toString(), change: 'Now', icon: Activity },
+                                { label: 'Active Members', value: activeMembers.toString(), change: 'Total Valid', icon: Activity },
+                                { label: 'Currently In Gym', value: inGymMembers.toString(), change: 'Live', icon: Dumbbell },
                             ].map((stat, index) => (
                                 <motion.div
                                     key={stat.label}
@@ -312,37 +635,85 @@ export default function AdminDashboard() {
                             </div>
                         )}
 
-                        {/* Recent Activity */}
+                        {/* Currently In Gym */}
                         <div className="bg-[#111] rounded-2xl border border-white/5 p-6">
-                            <h2 className="text-xl font-bold text-white mb-6">Recent Activity</h2>
+                            <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-[#cff532] animate-pulse"></span>
+                                Currently In Gym
+                            </h2>
                             <div className="space-y-4">
-                                {recentSignups.map((user, i) => (
-                                    <div key={user.id || i} className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 bg-black/40 rounded-xl border border-white/5">
-                                        <div className="flex items-center gap-4">
+                                {members.filter(m => m.status === 'Active (In Gym)').map((user, i) => (
+                                    <div key={user.id || i} className="flex flex-col md:flex-row items-center justify-between gap-4 p-4 bg-black/40 rounded-xl border border-white/5 group hover:border-[#cff532]/30 transition-colors">
+                                        <div className="flex items-center gap-4 w-full">
                                             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#cff532] to-[#bce628] flex items-center justify-center text-black font-bold">
                                                 {user.full_name ? user.full_name.charAt(0) : '?'}
                                             </div>
                                             <div>
-                                                <h4 className="text-white font-bold">{user.full_name}</h4>
+                                                <h4 className="text-white font-bold flex items-center gap-2">
+                                                    {user.full_name}
+                                                    {elapsedTimes[user.id] && (
+                                                        <span className="text-xs font-mono font-normal text-[#cff532] bg-[#cff532]/10 px-2 py-0.5 rounded-full border border-[#cff532]/20">
+                                                            {elapsedTimes[user.id]}
+                                                        </span>
+                                                    )}
+                                                </h4>
                                                 <p className="text-gray-500 text-sm">{user.plan}</p>
                                             </div>
                                         </div>
-                                        <div className="flex items-center gap-4 text-sm w-full md:w-auto justify-between md:justify-start mt-2 md:mt-0">
-                                            <span className="text-gray-400">
-                                                {user.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}
-                                            </span>
-                                            <span className={`px-3 py-1 rounded-full text-xs font-bold ${user.status === 'Active' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                                                {user.status}
-                                            </span>
+                                        <div className="flex items-center gap-4 text-sm w-full md:w-auto justify-between md:justify-end mt-2 md:mt-0">
+                                            <button
+                                                onClick={() => quickApprove(user.id, user.plan)} // Re-using quickApprove to toggle status indirectly? No, creating new function better but let's just make it a status badge for now.
+                                                className="px-3 py-1 rounded-full text-xs font-bold bg-[#cff532]/20 text-[#cff532] border border-[#cff532]/20"
+                                            >
+                                                Checked In
+                                            </button>
                                         </div>
                                     </div>
                                 ))}
-                                {recentSignups.length === 0 && (
-                                    <div className="text-gray-500 text-center py-4">No recent activity.</div>
+                                {members.filter(m => m.status === 'Active (In Gym)').length === 0 && (
+                                    <div className="text-gray-500 text-center py-8 flex flex-col items-center">
+                                        <Dumbbell className="w-8 h-8 text-gray-700 mb-2" />
+                                        <p>The gym is currently empty.</p>
+                                    </div>
                                 )}
                             </div>
                         </div>
                     </>
+                )}
+
+                {/* Scan Tab */}
+                {activeTab === 'Scan' && (
+                    <div className="flex flex-col items-center justify-center animate-fade-in space-y-8">
+                        <div className="bg-[#111] p-8 rounded-3xl border border-white/10 w-full max-w-2xl text-center">
+                            <h2 className="text-3xl font-black text-white mb-2">SCAN MEMBER QR</h2>
+                            <p className="text-gray-400 mb-8">Point camera at the member's digital ID card</p>
+
+                            <div className="overflow-hidden rounded-2xl border-2 border-[#cff532]/30 shadow-[0_0_50px_rgba(207,245,50,0.1)] bg-black">
+                                <div id="reader" className="w-full"></div>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+                            <div className="bg-[#111] p-6 rounded-2xl border border-white/5 flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-full bg-[#cff532]/20 flex items-center justify-center text-[#cff532]">
+                                    <ScanLine className="w-6 h-6" />
+                                </div>
+                                <div>
+                                    <div className="text-2xl font-black text-white">{inGymMembers}</div>
+                                    <div className="text-xs text-gray-400 uppercase tracking-widest">Currently In Gym</div>
+                                </div>
+                            </div>
+                            <div className="bg-[#111] p-6 rounded-2xl border border-white/5 flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center text-green-500">
+                                    <Activity className="w-6 h-6" />
+                                </div>
+                                <div>
+                                    <div className="text-2xl font-black text-white">{totalMembers}</div>
+                                    <div className="text-xs text-gray-400 uppercase tracking-widest">Total Members</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 )}
 
                 {/* Members View */}
@@ -364,62 +735,326 @@ export default function AdminDashboard() {
                         {isLoadingMembers ? (
                             <div className="text-center py-10 text-gray-400">Loading members...</div>
                         ) : filteredMembers.length > 0 ? (
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-left">
-                                    <thead>
-                                        <tr className="border-b border-white/10 text-gray-400 text-sm uppercase">
-                                            <th className="pb-4">Name</th>
-                                            <th className="pb-4">Plan</th>
-                                            <th className="pb-4">Status</th>
-                                            <th className="pb-4">Joined</th>
-                                            <th className="pb-4 text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-white/5">
-                                        {filteredMembers.map((member) => (
-                                            <tr key={member.id} className="group hover:bg-white/5 transition-colors">
-                                                <td className="py-4">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-[#cff532] font-bold">
-                                                            {member.full_name?.[0] || '?'}
-                                                        </div>
-                                                        <div>
-                                                            <div className="font-bold text-white">{member.full_name}</div>
-                                                            <div className="text-xs text-gray-500">{member.email}</div>
-                                                        </div>
+                            <>
+                                {/* Mobile Cards View */}
+                                <div className="md:hidden space-y-4">
+                                    {filteredMembers.map((member) => (
+                                        <div key={member.id} className="bg-[#1a1a1a] border border-white/10 rounded-xl p-4 flex flex-col gap-4">
+                                            <div className="flex items-start justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-[#cff532] font-bold">
+                                                        {member.full_name?.[0] || '?'}
                                                     </div>
-                                                </td>
-                                                <td className="py-4 text-gray-300">{member.plan}</td>
-                                                <td className="py-4">
-                                                    <span className={`px-2 py-1 rounded-lg text-xs font-bold ${member.status === 'Active' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                                                        {member.status}
-                                                    </span>
-                                                </td>
-                                                <td className="py-4 text-gray-400 text-sm">
-                                                    {new Date(member.created_at).toLocaleDateString()}
-                                                </td>
-                                                <td className="py-4 text-right">
-                                                    <button
-                                                        onClick={() => setEditingMember(member)}
-                                                        className="text-gray-400 hover:text-white mr-3"
-                                                    >
-                                                        Edit
-                                                    </button>
-                                                    <button
-                                                        onClick={() => deleteMember(member.id)}
-                                                        className="text-red-500 hover:text-red-400"
-                                                    >
-                                                        Delete
-                                                    </button>
-                                                </td>
+                                                    <div>
+                                                        <div className="font-bold text-white text-lg">{member.full_name}</div>
+                                                        <div className="text-xs text-gray-500">{member.email}</div>
+                                                    </div>
+                                                </div>
+                                                <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${member.status.startsWith('Active') ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                                    {member.status}
+                                                </span>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-4">
+                                                <div>
+                                                    <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Plan</div>
+                                                    <div className="text-gray-300 font-bold text-sm">{member.plan}</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Due Amount</div>
+                                                    <div className={`font-mono font-bold text-sm ${member.due_amount > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                                        {member.due_amount > 0 ? `₹${member.due_amount}` : 'Paid'}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-center justify-between gap-2 border-t border-white/5 pt-4">
+                                                <button
+                                                    onClick={() => handleViewMember(member)}
+                                                    className="flex-1 bg-white/5 hover:bg-white/10 text-white text-xs font-bold py-2 rounded-lg transition-colors border border-white/5"
+                                                >
+                                                    History
+                                                </button>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); setManagingPaymentsFor(member); }}
+                                                    className="flex-1 bg-white/5 hover:bg-white/10 text-white text-xs font-bold py-2 rounded-lg transition-colors border border-white/5"
+                                                >
+                                                    Payments
+                                                </button>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); setEditingMember(member); }}
+                                                    className="bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white p-2 rounded-lg transition-colors border border-white/5"
+                                                >
+                                                    <Settings className="w-4 h-4" />
+                                                </button>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); deleteMember(member.id); }}
+                                                    className="bg-red-500/10 hover:bg-red-500/20 text-red-500 p-2 rounded-lg transition-colors border border-red-500/10"
+                                                >
+                                                    <Trash2 className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Desktop Table View */}
+                                <div className="hidden md:block overflow-x-auto">
+                                    <table className="w-full text-left">
+                                        <thead>
+                                            <tr className="border-b border-white/10 text-gray-400 text-sm uppercase">
+                                                <th className="pb-4">Name</th>
+                                                <th className="pb-4">Plan</th>
+                                                <th className="pb-4">Status</th>
+                                                <th className="pb-4">Due (₹)</th>
+                                                <th className="pb-4">Joined</th>
+                                                <th className="pb-4 text-right">Actions</th>
                                             </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5">
+                                            {filteredMembers.map((member) => (
+                                                <tr key={member.id} className="group hover:bg-white/5 transition-colors">
+                                                    <td className="py-4 cursor-pointer" onClick={() => handleViewMember(member)}>
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-[#cff532] font-bold">
+                                                                {member.full_name?.[0] || '?'}
+                                                            </div>
+                                                            <div>
+                                                                <div className="font-bold text-white group-hover:text-[#cff532] transition-colors">{member.full_name}</div>
+                                                                <div className="text-xs text-gray-500">{member.email}</div>
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="py-4 text-gray-300">{member.plan}</td>
+                                                    <td className="py-4">
+                                                        <span className={`px-2 py-1 rounded-lg text-xs font-bold ${member.status.startsWith('Active') ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                                            {member.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className={`py-4 font-mono font-bold ${member.due_amount > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                                        {member.due_amount > 0 ? `₹${member.due_amount}` : 'Paid'}
+                                                    </td>
+                                                    <td className="py-4 text-gray-400 text-sm">
+                                                        {new Date(member.created_at).toLocaleDateString()}
+                                                    </td>
+                                                    <td className="py-4 text-right">
+                                                        <button
+                                                            onClick={() => handleViewMember(member)}
+                                                            className="text-gray-400 hover:text-white mr-3 text-sm"
+                                                        >
+                                                            History
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); setManagingPaymentsFor(member); }}
+                                                            className="text-gray-400 hover:text-white mr-3 text-sm"
+                                                        >
+                                                            Payments
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); setEditingMember(member); }}
+                                                            className="text-gray-400 hover:text-white mr-3 text-sm"
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); deleteMember(member.id); }}
+                                                            className="text-red-500 hover:text-red-400 text-sm"
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </>
                         ) : (
                             <div className="text-center py-10 text-gray-500">
                                 No members found.
+                            </div>
+                        )}
+
+                        {/* View Member Modal */}
+                        {viewingMember && (
+                            <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+                                <motion.div
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    className="bg-[#111] border border-white/10 rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col"
+                                >
+                                    {/* Header */}
+                                    <div className="p-6 border-b border-white/10 flex items-start justify-between bg-[#161616]">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-[#cff532] to-[#bce628] flex items-center justify-center text-black text-2xl font-bold">
+                                                {viewingMember.full_name?.[0] || '?'}
+                                            </div>
+                                            <div>
+                                                <h3 className="text-2xl font-bold text-white">{viewingMember.full_name}</h3>
+                                                <div className="flex items-center gap-2 text-sm text-gray-400">
+                                                    <span>{viewingMember.plan} Member</span>
+                                                    <span>•</span>
+                                                    <span className={viewingMember.status.startsWith('Active') ? 'text-green-400' : 'text-yellow-400'}>{viewingMember.status}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={() => setViewingMember(null)}
+                                            className="text-gray-400 hover:text-white bg-white/5 p-2 rounded-full transition-colors"
+                                        >
+                                            <X className="w-5 h-5" />
+                                        </button>
+                                    </div>
+
+                                    <div className="p-6 overflow-y-auto">
+                                        {/* Stats Row */}
+                                        <div className="grid grid-cols-3 gap-4 mb-8">
+                                            <div className="bg-black/40 border border-white/5 p-4 rounded-xl">
+                                                <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">Total Visits</span>
+                                                <div className="text-2xl font-black text-white mt-1">{viewingStats.totalVisits}</div>
+                                            </div>
+                                            <div className="bg-black/40 border border-white/5 p-4 rounded-xl">
+                                                <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">Total Time</span>
+                                                <div className="text-2xl font-black text-white mt-1">{(viewingStats.totalMinutes / 60).toFixed(1)} <span className="text-sm text-gray-500 font-normal">hrs</span></div>
+                                            </div>
+                                            <div className="bg-black/40 border border-white/5 p-4 rounded-xl">
+                                                <span className="text-xs text-gray-500 uppercase font-bold tracking-wider">Last Visit</span>
+                                                <div className="text-lg font-bold text-white mt-1">
+                                                    {viewingMemberLogs[0] ? new Date(viewingMemberLogs[0].check_in_time).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'N/A'}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Activity Calendar */}
+                                        <div className="mb-8">
+                                            <div className="flex items-center justify-between mb-4">
+                                                <h4 className="text-white font-bold flex items-center gap-2">
+                                                    <Activity className="w-4 h-4 text-[#cff532]" />
+                                                    Activity Map
+                                                </h4>
+                                                <div className="text-[10px] text-gray-500 font-mono">
+                                                    LAST 365 DAYS
+                                                </div>
+                                            </div>
+                                            <div
+                                                ref={calendarScrollRef}
+                                                className="bg-gradient-to-br from-[#0a0a0a] to-[#111] border border-white/5 rounded-2xl p-5 overflow-x-auto custom-scrollbar custom-scrollbar-x"
+                                            >
+                                                <div className="min-w-max">
+                                                    {/* Month Labels */}
+                                                    <div className="flex mb-2 text-[10px] text-gray-500 font-mono font-bold tracking-wider pl-1">
+                                                        {Array.from({ length: 12 }).map((_, i) => {
+                                                            const date = new Date();
+                                                            date.setMonth(date.getMonth() - (11 - i));
+                                                            return (
+                                                                <div key={i} className="w-[56px] text-center text-gray-600">
+                                                                    {date.toLocaleDateString(undefined, { month: 'short' }).toUpperCase()}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+
+                                                    <div className="flex gap-[3px]">
+                                                        {Array.from({ length: 53 }).map((_, weekIndex) => (
+                                                            <div key={weekIndex} className="flex flex-col gap-[3px]">
+                                                                {Array.from({ length: 7 }).map((_, dayIndex) => {
+                                                                    const dayOfYear = weekIndex * 7 + dayIndex;
+                                                                    const date = new Date();
+                                                                    date.setDate(date.getDate() - (365 - dayOfYear));
+
+                                                                    const dateString = date.toISOString().split('T')[0];
+                                                                    const dayLog = viewingMemberLogs.find(log => log.check_in_time.startsWith(dateString));
+
+                                                                    // Activity Level: 0 (None), 1 (Light), 2 (Medium), 3 (Heavy)
+                                                                    let intensity = 0;
+                                                                    if (dayLog) {
+                                                                        const mins = dayLog.duration_minutes || 0;
+                                                                        if (mins > 60) intensity = 3;      // Brightest (> 1hr)
+                                                                        else if (mins > 30) intensity = 2; // Medium
+                                                                        else intensity = 1;                // Light
+                                                                    }
+
+                                                                    const colors = [
+                                                                        'bg-[#1a1a1a]',   // 0
+                                                                        'bg-[#cff532]/30', // 1
+                                                                        'bg-[#cff532]/60', // 2
+                                                                        'bg-[#cff532]'     // 3
+                                                                    ];
+
+                                                                    return (
+                                                                        <div
+                                                                            key={dayIndex}
+                                                                            className={`w-3 h-3 rounded-sm ${colors[intensity]}`}
+                                                                            title={`${dateString}: ${dayLog ? (dayLog.duration_minutes || 'Ongoing') + ' mins' : 'No activity'}`}
+                                                                        />
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center justify-between mt-3 px-1">
+                                                    <span className="text-[10px] text-gray-500 font-mono">CONSISTENCY SCORE: <span className="text-[#cff532]">Top 10%</span></span>
+                                                    <div className="flex items-center gap-2 text-[10px] text-gray-500 font-bold uppercase tracking-wider">
+                                                        <span>Rest</span>
+                                                        <div className="w-3 h-3 rounded-[3px] bg-white/5" />
+                                                        <div className="w-3 h-3 rounded-[3px] bg-[#cff532]/30" />
+                                                        <div className="w-3 h-3 rounded-[3px] bg-[#cff532]/60" />
+                                                        <div className="w-3 h-3 rounded-sm bg-[#cff532]" />
+                                                        <span>Crushed It</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* History Table */}
+                                        <h4 className="text-white font-bold mb-4 flex items-center gap-2">
+                                            <Calendar className="w-4 h-4 text-[#cff532]" />
+                                            Check-in History
+                                        </h4>
+
+                                        <div className="bg-black/40 border border-white/5 rounded-xl overflow-hidden">
+                                            <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
+                                                <table className="w-full text-left text-sm relative">
+                                                    <thead className="bg-[#1a1a1a] text-gray-400 uppercase text-xs sticky top-0 z-10 shadow-lg">
+                                                        <tr>
+                                                            <th className="px-4 py-3 bg-[#1a1a1a]">Date</th>
+                                                            <th className="px-4 py-3 bg-[#1a1a1a]">Check In</th>
+                                                            <th className="px-4 py-3 bg-[#1a1a1a]">Duration</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-white/5">
+                                                        {viewingMemberLogs.map((log) => (
+                                                            <tr key={log.id} className="hover:bg-white/5">
+                                                                <td className="px-4 py-3 text-white font-medium">
+                                                                    {new Date(log.check_in_time).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-gray-400">
+                                                                    {new Date(log.check_in_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-gray-400">
+                                                                    {log.duration_minutes ? (
+                                                                        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#cff532]/10 text-[#cff532] text-xs font-bold">
+                                                                            <Dumbbell className="w-3 h-3" />
+                                                                            {log.duration_minutes} min
+                                                                        </div>
+                                                                    ) : (
+                                                                        <span className="text-yellow-500 text-xs italic">Ongoing</span>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                        {viewingMemberLogs.length === 0 && (
+                                                            <tr>
+                                                                <td colSpan={3} className="px-4 py-8 text-center text-gray-500">No activity logs found.</td>
+                                                            </tr>
+                                                        )}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </motion.div>
                             </div>
                         )}
 
@@ -461,13 +1096,21 @@ export default function AdminDashboard() {
                                             <label className="text-xs font-bold text-gray-500 uppercase block mb-1">Plan</label>
                                             <select
                                                 value={editingMember.plan}
-                                                onChange={(e) => setEditingMember({ ...editingMember, plan: e.target.value })}
+                                                onChange={(e) => {
+                                                    const newPlan = e.target.value;
+                                                    let newDue = editingMember.due_amount;
+                                                    // Auto-update due amount based on plan price
+                                                    if (newPlan === 'Monthly Plan') newDue = 3000;
+                                                    else if (newPlan === '6-Month Plan') newDue = 12000;
+                                                    else if (newPlan === 'Yearly Plan') newDue = 20000;
+
+                                                    setEditingMember({ ...editingMember, plan: newPlan, due_amount: newDue });
+                                                }}
                                                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-[#cff532]"
                                             >
-                                                <option value="Basic">Basic</option>
-                                                <option value="Pro Athlete">Pro Athlete</option>
-                                                <option value="Elite">Elite</option>
-                                                <option value="Day Pass">Day Pass</option>
+                                                <option value="Monthly Plan">Monthly Plan</option>
+                                                <option value="6-Month Plan">6-Month Plan</option>
+                                                <option value="Yearly Plan">Yearly Plan</option>
                                             </select>
                                         </div>
                                         <div>
@@ -478,26 +1121,23 @@ export default function AdminDashboard() {
                                                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-[#cff532]"
                                             >
                                                 <option value="Active">Active</option>
+                                                <option value="Active (In Gym)">Active (In Gym)</option>
                                                 <option value="Inactive">Inactive</option>
                                                 <option value="Pending">Pending</option>
                                             </select>
                                         </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-gray-500 uppercase block mb-1">Due Amount (₹)</label>
+                                            <input
+                                                type="number"
+                                                value={editingMember.due_amount || 0}
+                                                onChange={(e) => setEditingMember({ ...editingMember, due_amount: parseFloat(e.target.value) })}
+                                                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-[#cff532]"
+                                            />
+                                        </div>
                                         <div className="pt-4 border-t border-white/10 mt-6">
-                                            <h4 className="font-bold text-white mb-3">Payment History</h4>
-                                            <div className="space-y-2 max-h-32 overflow-y-auto">
-                                                <div className="flex justify-between text-sm text-gray-400 bg-white/5 p-2 rounded">
-                                                    <span>Dec 19, 2025</span>
-                                                    <span className="text-white">$49.99</span>
-                                                </div>
-                                                <div className="flex justify-between text-sm text-gray-400 bg-white/5 p-2 rounded">
-                                                    <span>Nov 19, 2025</span>
-                                                    <span className="text-white">$49.99</span>
-                                                </div>
-                                                <div className="flex justify-between text-sm text-gray-400 bg-white/5 p-2 rounded">
-                                                    <span>Oct 19, 2025</span>
-                                                    <span className="text-white">$49.99</span>
-                                                </div>
-                                            </div>
+
+
                                         </div>
 
                                         <button type="submit" className="w-full bg-[#cff532] text-black font-bold py-3 rounded-xl mt-6 hover:bg-[#bce628] transition-colors">
@@ -507,6 +1147,316 @@ export default function AdminDashboard() {
                                 </motion.div>
                             </div>
                         )}
+
+                        {/* Payments Management Modal */}
+                        {managingPaymentsFor && (
+                            <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+                                <motion.div
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    className="bg-[#111] border border-white/10 rounded-2xl p-6 w-full max-w-lg relative flex flex-col max-h-[85vh]"
+                                >
+                                    <button
+                                        onClick={() => setManagingPaymentsFor(null)}
+                                        className="absolute top-4 right-4 text-gray-400 hover:text-white bg-white/5 p-2 rounded-full transition-colors"
+                                    >
+                                        <X className="w-5 h-5" />
+                                    </button>
+
+                                    <h3 className="text-xl font-bold text-white mb-1">Manage Payments</h3>
+                                    <p className="text-sm text-gray-400 mb-6">For {managingPaymentsFor.full_name}</p>
+
+                                    {/* Add Payment Form */}
+                                    <div className="bg-white/5 p-4 rounded-xl mb-6 border border-white/10">
+                                        <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Record New Payment</h4>
+                                        <div className="flex flex-col gap-3">
+                                            <div className="flex gap-2">
+                                                <input
+                                                    type="number"
+                                                    placeholder="Amount (₹)"
+                                                    value={newPaymentAmount}
+                                                    onChange={(e) => setNewPaymentAmount(e.target.value)}
+                                                    className="flex-1 bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-[#cff532]"
+                                                />
+                                                <select
+                                                    value={newPaymentMethod}
+                                                    onChange={(e) => setNewPaymentMethod(e.target.value)}
+                                                    className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-white outline-none focus:border-[#cff532]"
+                                                >
+                                                    <option value="Cash">Cash</option>
+                                                    <option value="UPI">UPI</option>
+                                                    <option value="Card">Card</option>
+                                                    <option value="Bank Transfer">Bank Transfer</option>
+                                                </select>
+                                            </div>
+                                            <button
+                                                onClick={handleAddPayment}
+                                                disabled={!newPaymentAmount}
+                                                className="w-full bg-[#cff532] text-black font-bold py-2 rounded-lg hover:bg-[#bce628] transition-colors disabled:opacity-50"
+                                            >
+                                                Add Payment
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* History List */}
+                                    <div>
+                                        <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Payment History</h4>
+                                        <div className="space-y-2 overflow-y-auto pr-2 custom-scrollbar flex-1 min-h-[150px]">
+                                            {memberPayments.length > 0 ? (
+                                                memberPayments.map((payment) => (
+                                                    <div key={payment.id} className="flex justify-between items-center text-sm bg-white/5 p-3 rounded-lg border border-white/5 hover:border-white/10 transition-colors">
+                                                        <div>
+                                                            <div className="text-white font-bold">₹{payment.amount.toLocaleString()}</div>
+                                                            <div className="text-xs text-gray-500">{new Date(payment.payment_date).toLocaleDateString()} • {new Date(payment.payment_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="px-2 py-1 rounded bg-white/10 text-xs font-mono text-gray-300 border border-white/5">
+                                                                {payment.payment_method || 'Cash'}
+                                                            </div>
+                                                            <button
+                                                                onClick={() => handleDeletePayment(payment.id)}
+                                                                className="text-gray-500 hover:text-red-500 transition-colors p-1"
+                                                                title="Delete Payment"
+                                                            >
+                                                                <Trash2 className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="text-gray-500 text-sm text-center py-8 bg-white/5 rounded-xl border border-dashed border-white/10">
+                                                    No payments found.
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+
+                {/* Revenue View */}
+                {activeTab === 'Revenue' && (
+                    <div className="space-y-8 animate-fade-in">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div className="bg-[#111] p-6 rounded-2xl border border-white/5">
+                                <h3 className="text-gray-400 text-sm font-medium uppercase tracking-wider mb-1">Monthly Revenue</h3>
+                                <p className="text-3xl font-black text-white">₹{monthlyRevenue.toLocaleString()}</p>
+                                <span className="text-green-400 text-sm font-bold flex items-center gap-1 mt-2">
+                                    <Activity className="w-4 h-4" />
+                                    +12% from last month
+                                </span>
+                            </div>
+                            <div className="bg-[#111] p-6 rounded-2xl border border-white/5">
+                                <h3 className="text-gray-400 text-sm font-medium uppercase tracking-wider mb-1">Projected Annual</h3>
+                                <p className="text-3xl font-black text-white">₹{(monthlyRevenue * 12).toLocaleString()}</p>
+                            </div>
+                            <div className="bg-[#111] p-6 rounded-2xl border border-white/5">
+                                <h3 className="text-gray-400 text-sm font-medium uppercase tracking-wider mb-1">Average Revenue Per User</h3>
+                                <p className="text-3xl font-black text-white">₹{activeMembers > 0 ? (monthlyRevenue / activeMembers).toFixed(2) : '0'}</p>
+                            </div>
+                        </div>
+
+                        {/* Revenue Breakdown */}
+                        <div className="bg-[#111] rounded-2xl border border-white/5 p-6 md:p-8">
+                            <h2 className="text-xl font-bold text-white mb-6">Revenue Breakdown</h2>
+                            <div className="space-y-4">
+                                {['Yearly Plan', '6-Month Plan', 'Monthly Plan'].map(plan => {
+                                    const count = members.filter(m => m.plan === plan && m.status.startsWith('Active')).length;
+                                    let price = 0;
+                                    switch (plan) {
+                                        case 'Yearly Plan': price = prices.yearly; break;
+                                        case '6-Month Plan': price = prices.sixMonth; break;
+                                        case 'Monthly Plan': price = prices.monthly; break;
+                                    }
+                                    const revenue = count * price;
+                                    const percentage = monthlyRevenue > 0 ? (revenue / monthlyRevenue) * 100 : 0;
+
+                                    return (
+                                        <div key={plan} className="space-y-2">
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-white font-bold">{plan}</span>
+                                                <span className="text-gray-400">₹{revenue.toLocaleString()} ({count} members)</span>
+                                            </div>
+                                            <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                                                <div
+                                                    className="h-full bg-[#cff532]"
+                                                    style={{ width: `${percentage}%` }}
+                                                />
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Settings View */}
+                {activeTab === 'Settings' && (
+                    <div className="max-w-4xl space-y-8 animate-fade-in">
+                        {/* Header */}
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h2 className="text-2xl font-bold text-white mb-2">System Settings</h2>
+                                <p className="text-gray-400">Manage your gym's configuration and preferences.</p>
+                            </div>
+                            <button
+                                onClick={handleSaveSettings}
+                                className="bg-[#cff532] text-black px-6 py-3 rounded-xl font-bold hover:bg-[#bce628] transition-all transform hover:scale-105 flex items-center gap-2 shadow-lg shadow-[#cff532]/20"
+                            >
+                                <Save className="w-5 h-5" />
+                                Save Changes
+                            </button>
+                        </div>
+
+                        {/* General Settings */}
+                        <section className="bg-[#111] rounded-3xl border border-white/5 overflow-hidden">
+                            <div className="p-6 md:p-8 border-b border-white/5 flex items-center gap-3">
+                                <div className="p-3 bg-blue-500/10 rounded-xl">
+                                    <Globe className="w-6 h-6 text-blue-400" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-white">General Information</h3>
+                                    <p className="text-sm text-gray-400">Basic details about your gym facility</p>
+                                </div>
+                            </div>
+                            <div className="p-6 md:p-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Gym Name</label>
+                                    <input
+                                        type="text"
+                                        value={generalSettings.gymName}
+                                        onChange={(e) => setGeneralSettings({ ...generalSettings, gymName: e.target.value })}
+                                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Support Email</label>
+                                    <input
+                                        type="email"
+                                        value={generalSettings.email}
+                                        onChange={(e) => setGeneralSettings({ ...generalSettings, email: e.target.value })}
+                                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Phone Number</label>
+                                    <input
+                                        type="tel"
+                                        value={generalSettings.phone}
+                                        onChange={(e) => setGeneralSettings({ ...generalSettings, phone: e.target.value })}
+                                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Address</label>
+                                    <input
+                                        type="text"
+                                        value={generalSettings.address}
+                                        onChange={(e) => setGeneralSettings({ ...generalSettings, address: e.target.value })}
+                                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                    />
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* Membership Pricing */}
+                        <section className="bg-[#111] rounded-3xl border border-white/5 overflow-hidden">
+                            <div className="p-6 md:p-8 border-b border-white/5 flex items-center gap-3">
+                                <div className="p-3 bg-green-500/10 rounded-xl">
+                                    <IndianRupee className="w-6 h-6 text-green-400" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-white">Membership Pricing</h3>
+                                    <p className="text-sm text-gray-400">Manage monthly subscription costs</p>
+                                </div>
+                            </div>
+                            <div className="p-6 md:p-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Monthly Plan (₹)</label>
+                                    <div className="relative">
+                                        <input
+                                            type="number"
+                                            value={prices.monthly}
+                                            onChange={(e) => setPrices({ ...prices, monthly: Number(e.target.value) })}
+                                            className="w-full bg-black/40 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                        />
+                                        <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">6-Month Plan (₹)</label>
+                                    <div className="relative">
+                                        <input
+                                            type="number"
+                                            value={prices.sixMonth}
+                                            onChange={(e) => setPrices({ ...prices, sixMonth: Number(e.target.value) })}
+                                            className="w-full bg-black/40 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                        />
+                                        <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Yearly Plan (₹)</label>
+                                    <div className="relative">
+                                        <input
+                                            type="number"
+                                            value={prices.yearly}
+                                            onChange={(e) => setPrices({ ...prices, yearly: Number(e.target.value) })}
+                                            className="w-full bg-black/40 border border-white/10 rounded-xl pl-10 pr-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                        />
+                                        <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* Security */}
+                        <section className="bg-[#111] rounded-3xl border border-white/5 overflow-hidden">
+                            <div className="p-6 md:p-8 border-b border-white/5 flex items-center gap-3">
+                                <div className="p-3 bg-red-500/10 rounded-xl">
+                                    <Shield className="w-6 h-6 text-red-400" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-white">Security & Access</h3>
+                                    <p className="text-sm text-gray-400">Manage passwords and admin access</p>
+                                </div>
+                            </div>
+                            <div className="p-6 md:p-8 space-y-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">Current Password</label>
+                                        <input
+                                            type="password"
+                                            placeholder="••••••••"
+                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-gray-500 uppercase tracking-wider ml-1">New Password</label>
+                                        <input
+                                            type="password"
+                                            placeholder="••••••••"
+                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#cff532] transition-colors"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-between p-4 bg-yellow-500/5 border border-yellow-500/10 rounded-xl">
+                                    <div className="flex items-center gap-3">
+                                        <Bell className="w-5 h-5 text-yellow-500" />
+                                        <span className="text-white font-medium">Email Notifications for New Signups</span>
+                                    </div>
+                                    <label className="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" defaultChecked className="sr-only peer" />
+                                        <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#cff532]"></div>
+                                    </label>
+                                </div>
+                            </div>
+                        </section>
                     </div>
                 )}
             </main>

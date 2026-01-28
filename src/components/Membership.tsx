@@ -2,46 +2,48 @@
 
 import { motion } from "framer-motion";
 import { Check } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 const plans = [
     {
-        name: "Day Pass",
-        price: "$25",
+        name: "Monthly Plan",
+        price: "₹3000",
         period: "/mo",
         features: [
             "Access to gym floor",
             "Locker room access",
             "Free WiFi",
+            "Open 6am - 10pm"
         ],
         highlight: false,
         color: "bg-white/5",
         buttonColor: "bg-white text-black hover:bg-gray-200"
     },
     {
-        name: "Pro Athlete",
-        price: "$89",
-        period: "/mo",
+        name: "6-Month Plan",
+        price: "₹12000",
+        period: "/6mo",
         features: [
+            "All Monthly benefits",
             "24/7 Gym Access",
-            "Group Classes Included",
             "Sauna & Recovery Zone",
-            "Free Guest Pass (1/mo)",
-            "Nutrition Guide"
+            "Free Guest Pass (2/mo)",
+            "Nutritional Guidance"
         ],
         highlight: true,
         color: "bg-[#1a1a1a] border-[#cff532]",
         buttonColor: "bg-[#cff532] text-black hover:bg-[#bce628]"
     },
     {
-        name: "Elite",
-        price: "$149",
-        period: "/mo",
+        name: "Yearly Plan",
+        price: "₹20000",
+        period: "/yr",
         features: [
-            "All Pro benefits",
-            "2 Personal Training Sessions",
+            "All 6-Month benefits",
+            "Personal Training (2 Sessions)",
             "Custom Workout Plan",
             "Priority Support",
-            "Merch Pack"
+            "Merch Pack Included"
         ],
         highlight: false,
         color: "bg-white/5",
@@ -50,6 +52,7 @@ const plans = [
 ];
 
 export default function Membership() {
+    const router = useRouter();
     return (
         <section id="pricing" className="py-24 bg-[#050505] relative">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
@@ -96,7 +99,10 @@ export default function Membership() {
                                 ))}
                             </ul>
 
-                            <button className={`w-full py-4 rounded-xl font-bold uppercase tracking-wide transition-all ${plan.buttonColor}`}>
+                            <button
+                                onClick={() => router.push(`/auth?plan=${encodeURIComponent(plan.name)}`)}
+                                className={`w-full py-4 rounded-xl font-bold uppercase tracking-wide transition-all ${plan.buttonColor}`}
+                            >
                                 Select Plan
                             </button>
                         </motion.div>
