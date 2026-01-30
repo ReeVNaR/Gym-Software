@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Users, DollarSign, Activity, Settings, LogOut, Dumbbell, Menu, X, Save, Lock, Globe, Bell, ChevronRight, Shield, ScanLine, Calendar, IndianRupee, Trash2 } from "lucide-react";
+import { Users, DollarSign, Activity, Settings, LogOut, Dumbbell, Menu, X, Save, Lock, Globe, Bell, ChevronRight, Shield, ScanLine, Calendar, IndianRupee, Trash2, Trophy } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
@@ -24,6 +24,8 @@ export default function AdminDashboard() {
         }
     }, [router]);
     const [members, setMembers] = useState<any[]>([]);
+    const [leaderboard, setLeaderboard] = useState<any[]>([]);
+    const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
     const [isLoadingMembers, setIsLoadingMembers] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
     const [editingMember, setEditingMember] = useState<any>(null);
@@ -165,8 +167,8 @@ export default function AdminDashboard() {
                     await scanner.start(
                         { facingMode: "environment" },
                         {
-                            fps: 10,
-                            qrbox: { width: 250, height: 250 }
+                            fps: 15,
+                            qrbox: { width: 300, height: 300 }
                         },
                         async (decodedText) => {
                             // Use function ref or similar if lastScannedMs is state, 
@@ -258,13 +260,37 @@ export default function AdminDashboard() {
                         })
                         .eq('id', openLog.id);
 
-                    alert(`${member.full_name} checked OUT.\nDuration: ${durationMinutes} mins`);
+                    alert(`${member.full_name} checked OUT.\nDuration: ${durationMinutes} mins\nXP Gained: ${durationMinutes} XP`);
                 } else {
                     // Fallback if no open log found
                     alert(`${member.full_name} checked OUT.`);
                 }
             } else {
                 // CHECK IN LOGIC
+                // Auto-close any previous open sessions to ensure no overlapping "ongoing" sessions in history
+                const { data: staleLogs } = await supabase
+                    .from('activity_logs')
+                    .select('*')
+                    .eq('member_id', memberId)
+                    .is('check_out_time', null);
+
+                if (staleLogs && staleLogs.length > 0) {
+                    for (const log of staleLogs) {
+                        const checkInTime = new Date(log.check_in_time).getTime();
+                        const now = new Date().getTime();
+                        const durationMinutes = Math.round((now - checkInTime) / 1000 / 60);
+
+                        await supabase
+                            .from('activity_logs')
+                            .update({
+                                check_out_time: new Date().toISOString(),
+                                duration_minutes: durationMinutes
+                            })
+                            .eq('id', log.id);
+                    }
+                }
+
+                // Create new session
                 await supabase
                     .from('activity_logs')
                     .insert({
@@ -353,6 +379,54 @@ export default function AdminDashboard() {
 
         return () => clearInterval(interval);
     }, [activeSessions]);
+
+    // Admin Leaderboard Fetch
+    useEffect(() => {
+        if (activeTab === 'Leaderboard') {
+            async function fetchLeaderboard() {
+                setLoadingLeaderboard(true);
+                try {
+                    // Reuse members state if available, or fetch
+                    let allMembers = members;
+                    if (members.length === 0) {
+                        const { data, error } = await supabase.from('members').select('id, full_name, plan, status');
+                        if (error) throw error;
+                        allMembers = data || [];
+                    }
+
+                    // Get all logs
+                    const { data: allLogs, error: logsError } = await supabase
+                        .from('activity_logs')
+                        .select('member_id, duration_minutes');
+
+                    if (logsError) throw logsError;
+
+                    // Calculate XP
+                    const xpMap: Record<string, number> = {};
+                    allLogs?.forEach(log => {
+                        if (log.duration_minutes) {
+                            xpMap[log.member_id] = (xpMap[log.member_id] || 0) + log.duration_minutes;
+                        }
+                    });
+
+                    // Combine and Sort
+                    const sortedLeaderboard = allMembers
+                        .map(m => ({
+                            ...m,
+                            xp: xpMap[m.id] || 0
+                        }))
+                        .sort((a: any, b: any) => b.xp - a.xp);
+
+                    setLeaderboard(sortedLeaderboard);
+                } catch (e) {
+                    console.error("Error fetching leaderboard", e);
+                } finally {
+                    setLoadingLeaderboard(false);
+                }
+            }
+            fetchLeaderboard();
+        }
+    }, [activeTab, members]);
 
     async function fetchMembers() {
         setIsLoadingMembers(true);
@@ -516,6 +590,7 @@ export default function AdminDashboard() {
                         { name: 'Dashboard', icon: Activity },
                         { name: 'Scan', icon: ScanLine },
                         { name: 'Members', icon: Users },
+                        { name: 'Leaderboard', icon: Trophy },
                         { name: 'Revenue', icon: IndianRupee },
                         { name: 'Settings', icon: Settings },
                     ].map((item) => (
@@ -713,6 +788,76 @@ export default function AdminDashboard() {
                                 </div>
                             </div>
                         </div>
+                    </div>
+                )}
+
+                {/* Leaderboard Tab */}
+                {activeTab === 'Leaderboard' && (
+                    <div className="bg-[#111] rounded-2xl border border-white/5 p-6">
+                        <div className="flex flex-col items-center justify-center mb-8">
+                            <div className="bg-[#cff532]/10 p-4 rounded-full mb-4">
+                                <Trophy className="w-10 h-10 text-[#cff532]" />
+                            </div>
+                            <h2 className="text-2xl font-black text-white text-center">Global Leaderboard</h2>
+                            <p className="text-gray-400 text-center">Top Performing Members by XP (Workout Duration)</p>
+                        </div>
+
+                        {loadingLeaderboard ? (
+                            <div className="text-center py-12 text-gray-500">Calculating Rankings...</div>
+                        ) : (
+                            <div className="space-y-4 max-w-4xl mx-auto">
+                                {leaderboard.map((user, index) => {
+                                    const rank = index + 1;
+                                    return (
+                                        <div key={user.id} className={`group flex flex-col md:flex-row items-center gap-4 p-4 rounded-xl border transition-all hover:scale-[1.01] ${rank === 1 ? 'bg-gradient-to-r from-[#cff532]/20 to-transparent border-[#cff532]/30' : rank <= 3 ? 'bg-white/5 border-white/10' : 'bg-black/40 border-white/5'}`}>
+
+                                            {/* Rank Badge */}
+                                            <div className="flex items-center justify-center w-12 h-12 md:w-16 md:h-16 flex-shrink-0">
+                                                {rank <= 3 ? (
+                                                    <div className={`relative w-10 h-10 md:w-12 md:h-12 flex items-center justify-center rounded-full font-black text-lg md:text-xl shadow-lg
+                                                        ${rank === 1 ? 'bg-[#cff532] text-black shadow-[#cff532]/40' :
+                                                            rank === 2 ? 'bg-gray-300 text-black shadow-gray-300/40' :
+                                                                'bg-amber-600 text-white shadow-amber-600/40'}`}>
+                                                        {rank}
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-gray-500 font-bold text-xl">#{rank}</span>
+                                                )}
+                                            </div>
+
+                                            {/* User Info */}
+                                            <div className="flex items-center gap-4 flex-1 w-full md:w-auto">
+                                                <div className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center text-white font-bold text-lg">
+                                                    {user.full_name?.charAt(0) || '?'}
+                                                </div>
+                                                <div>
+                                                    <h3 className={`font-bold text-lg ${rank === 1 ? 'text-[#cff532]' : 'text-white'}`}>
+                                                        {user.full_name}
+                                                    </h3>
+                                                    <div className="flex items-center gap-2 text-xs text-gray-400">
+                                                        <span>{user.plan}</span>
+                                                        <span className="w-1 h-1 bg-gray-600 rounded-full" />
+                                                        <span className={user.status === 'Active (In Gym)' ? 'text-[#cff532]' : ''}>{user.status}</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* XP Stats */}
+                                            <div className="flex items-center justify-between w-full md:w-auto gap-8 md:px-8 mt-2 md:mt-0 border-t md:border-t-0 border-white/5 pt-3 md:pt-0">
+                                                <div className="text-center">
+                                                    <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">Level</div>
+                                                    <div className="text-white font-mono font-bold text-lg">{Math.floor(user.xp / 60) + 1}</div>
+                                                </div>
+                                                <div className="text-right min-w-[100px]">
+                                                    <div className="text-[10px] text-gray-500 uppercase tracking-widest font-bold mb-1">Total XP</div>
+                                                    <div className="text-[#cff532] font-mono font-black text-2xl">{user.xp.toLocaleString()}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
                 )}
 

@@ -1,7 +1,8 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowRight, Play } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import Link from "next/link";
 
 export default function Hero() {
     return (
@@ -45,28 +46,15 @@ export default function Hero() {
                         transition={{ duration: 0.8, delay: 0.2, ease: "easeOut" }}
                         className="flex flex-col sm:flex-row gap-4"
                     >
-                        <button className="group bg-[#cff532] text-black px-8 py-4 rounded-full font-bold text-lg flex items-center justify-center gap-2 hover:bg-[#bce628] transition-all hover:scale-105">
+                        <Link href="/auth" className="group bg-[#cff532] text-black px-8 py-4 rounded-full font-bold text-lg flex items-center justify-center gap-2 hover:bg-[#bce628] transition-all hover:scale-105 w-fit">
                             Start Your Journey
                             <ArrowRight className="group-hover:translate-x-1 transition-transform" />
-                        </button>
-                        <button className="group border border-white/30 hover:border-[#cff532] text-white hover:text-[#cff532] px-8 py-4 rounded-full font-bold text-lg flex items-center justify-center gap-2 backdrop-blur-sm transition-all hover:bg-white/5">
-                            <Play className="fill-current w-4 h-4" />
-                            Watch Video
-                        </button>
+                        </Link>
                     </motion.div>
                 </div>
             </div>
 
-            {/* Scroll indicator */}
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 1, duration: 1 }}
-                className="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2"
-            >
-                <span className="text-white/50 text-xs tracking-widest uppercase">Scroll</span>
-                <div className="w-[1px] h-12 bg-gradient-to-b from-[#cff532] to-transparent" />
-            </motion.div>
-        </section>
+
+        </section >
     );
 }
