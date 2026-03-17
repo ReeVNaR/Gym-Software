@@ -53,11 +53,14 @@ export default function MemberDashboard() {
 
         async function fetchMemberData() {
             try {
-                const data = await getMember(memberId as string);
+                const [data, activity, fullHistory] = await Promise.all([
+                    getMember(memberId as string),
+                    getMemberActivity(memberId as string),
+                    getMemberHistory(memberId as string)
+                ]);
+
                 if (data) {
                     setMember(data);
-                    const activity = await getMemberActivity(memberId as string);
-                    const fullHistory = await getMemberHistory(memberId as string);
                     if (fullHistory) setActivityHistory(fullHistory);
                     setLastActivity(activity);
                     setIsLoading(false);

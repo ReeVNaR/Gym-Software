@@ -45,8 +45,10 @@ export async function getMemberHistory(memberId: string) {
 
 export async function getLeaderboard() {
     await dbConnect();
-    const members = await Member.find({}, 'id _id full_name plan status').lean();
-    const logs = await ActivityLog.find({ duration_minutes: { $exists: true } }, 'member_id duration_minutes').lean();
+    const [members, logs] = await Promise.all([
+        Member.find({}, 'id _id full_name plan status').lean(),
+        ActivityLog.find({ duration_minutes: { $exists: true } }, 'member_id duration_minutes').lean()
+    ]);
     
     const xpMap: Record<string, number> = {};
     logs.forEach((log: any) => {
