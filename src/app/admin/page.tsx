@@ -5,7 +5,11 @@ import { Users, DollarSign, Activity, Settings, LogOut, Dumbbell, Menu, X, Save,
 import { Html5Qrcode } from "html5-qrcode";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
-import { supabase } from "@/lib/supabase";
+import {
+    getAllMembers, getPayments, addPayment, deletePaymentAction,
+    deleteMemberAction, updateMemberAction, handleScanAction,
+    getActiveSessionsAction, getLeaderboard, updateMemberAction as quickApproveAction, getMemberHistory
+} from "@/app/actions";
 
 
 export default function AdminDashboard() {
@@ -70,11 +74,7 @@ export default function AdminDashboard() {
     }, [managingPaymentsFor]);
 
     async function fetchPayments(memberId: string) {
-        const { data } = await supabase
-            .from('payments')
-            .select('*')
-            .eq('member_id', memberId)
-            .order('payment_date', { ascending: false });
+        const data = await getPayments(memberId);
         if (data) setMemberPayments(data);
     }
 
@@ -82,29 +82,14 @@ export default function AdminDashboard() {
         if (!managingPaymentsFor || !newPaymentAmount) return;
 
         try {
-            const { error } = await supabase.from('payments').insert({
-                member_id: managingPaymentsFor.id,
-                amount: parseFloat(newPaymentAmount),
-                payment_method: newPaymentMethod,
-                payment_date: new Date().toISOString()
-            });
-            if (error) throw error;
+            await addPayment(managingPaymentsFor.id, parseFloat(newPaymentAmount), newPaymentMethod);
 
-
-
-            // Automatically reduce due amount (allow negative for credit)
+            // Automatically reduce due amount (allow negative for credit) locally
             const currentDue = managingPaymentsFor.due_amount || 0;
             const newDue = currentDue - parseFloat(newPaymentAmount);
 
-            const { error: updateError } = await supabase.from('members').update({ due_amount: newDue }).eq('id', managingPaymentsFor.id);
-
-            if (updateError) {
-                console.error("Error updating due amount:", updateError);
-            } else {
-                // Update local state to reflect change immediately
-                setMembers(prev => prev.map((m: any) => m.id === managingPaymentsFor.id ? { ...m, due_amount: newDue } : m));
-                setManagingPaymentsFor((prev: any) => ({ ...prev, due_amount: newDue }));
-            }
+            setMembers(prev => prev.map((m: any) => m.id === managingPaymentsFor.id ? { ...m, due_amount: newDue } : m));
+            setManagingPaymentsFor((prev: any) => ({ ...prev, due_amount: newDue }));
 
             // Refresh
             fetchPayments(managingPaymentsFor.id);
@@ -122,15 +107,12 @@ export default function AdminDashboard() {
         if (!paymentToDelete) return;
 
         try {
-            const { error } = await supabase.from('payments').delete().eq('id', paymentId);
-            if (error) throw error;
+            await deletePaymentAction(paymentId);
 
-            // Revert due amount
+            // Revert due amount locally
             if (managingPaymentsFor) {
                 const currentDue = managingPaymentsFor.due_amount || 0;
                 const newDue = currentDue + paymentToDelete.amount;
-
-                await supabase.from('members').update({ due_amount: newDue }).eq('id', managingPaymentsFor.id);
 
                 setMembers(prev => prev.map((m: any) => m.id === managingPaymentsFor.id ? { ...m, due_amount: newDue } : m));
                 setManagingPaymentsFor((prev: any) => ({ ...prev, due_amount: newDue }));
@@ -209,145 +191,46 @@ export default function AdminDashboard() {
     }, [activeTab]);
 
     async function handleScan(memberId: string) {
-        // Find member
-        const { data: member, error } = await supabase.from('members').select('*').eq('id', memberId).single();
-
-        if (error || !member) {
-            alert("Member not found!");
-            return;
-        }
-
-        const isCheckedIn = member.status === 'Active (In Gym)';
-        const newStatus = isCheckedIn ? 'Active' : 'Active (In Gym)';
-        const message = isCheckedIn ? `${member.full_name} checked OUT.` : `${member.full_name} checked IN!`;
-
         try {
-            // For non-active members (e.g. pending/inactive), warn admin
-            if (!member.status.startsWith('Active')) {
-                if (!confirm(`Member status is ${member.status}. Allow check-in anyway?`)) return;
-            }
+            const { member, isCheckedIn, durationMinutes } = await handleScanAction(memberId);
 
-            const { error: updateError } = await supabase
-                .from('members')
-                .update({ status: newStatus })
-                .eq('id', memberId);
-
-            if (updateError) throw updateError;
-
-            // Log Activity
             if (isCheckedIn) {
-                // CHECK OUT LOGIC
-                // Find the open session
-                const { data: openLog } = await supabase
-                    .from('activity_logs')
-                    .select('*')
-                    .eq('member_id', memberId)
-                    .is('check_out_time', null)
-                    .order('check_in_time', { ascending: false })
-                    .limit(1)
-                    .single();
-
-                if (openLog) {
-                    const checkInTime = new Date(openLog.check_in_time).getTime();
-                    const checkOutTime = new Date().getTime();
-                    const durationMinutes = Math.round((checkOutTime - checkInTime) / 1000 / 60);
-
-                    await supabase
-                        .from('activity_logs')
-                        .update({
-                            check_out_time: new Date().toISOString(),
-                            duration_minutes: durationMinutes
-                        })
-                        .eq('id', openLog.id);
-
-                    alert(`${member.full_name} checked OUT.\nDuration: ${durationMinutes} mins\nXP Gained: ${durationMinutes} XP`);
-                } else {
-                    // Fallback if no open log found
-                    alert(`${member.full_name} checked OUT.`);
-                }
+                alert(`${member.full_name} checked OUT.\\nDuration: ${durationMinutes} mins\\nXP Gained: ${durationMinutes} XP`);
             } else {
-                // CHECK IN LOGIC
-                // Auto-close any previous open sessions to ensure no overlapping "ongoing" sessions in history
-                const { data: staleLogs } = await supabase
-                    .from('activity_logs')
-                    .select('*')
-                    .eq('member_id', memberId)
-                    .is('check_out_time', null);
-
-                if (staleLogs && staleLogs.length > 0) {
-                    for (const log of staleLogs) {
-                        const checkInTime = new Date(log.check_in_time).getTime();
-                        const now = new Date().getTime();
-                        const durationMinutes = Math.round((now - checkInTime) / 1000 / 60);
-
-                        await supabase
-                            .from('activity_logs')
-                            .update({
-                                check_out_time: new Date().toISOString(),
-                                duration_minutes: durationMinutes
-                            })
-                            .eq('id', log.id);
-                    }
-                }
-
-                // Create new session
-                await supabase
-                    .from('activity_logs')
-                    .insert({
-                        member_id: memberId,
-                        check_in_time: new Date().toISOString()
-                    });
                 alert(`${member.full_name} checked IN!`);
             }
 
-            // State will update via realtime subscription
-        } catch (e) {
+            fetchMembers();
+        } catch (e: any) {
             console.error(e);
-            alert("Failed to update status");
+            alert(e.message || "Failed to update status");
         }
     }
 
     // Fetch members when switching to Members tab
     useEffect(() => {
-        let channel: any;
-
         if (activeTab === 'Members' || activeTab === 'Dashboard') {
             fetchMembers();
-
-            // Realtime subscription
-            channel = supabase
-                .channel('members-realtime')
-                .on('postgres_changes', { event: '*', schema: 'public', table: 'members' }, (payload) => {
-                    console.log('Realtime change:', payload);
-
-                    if (payload.eventType === 'INSERT') {
-                        setMembers((prev) => [payload.new, ...prev]);
-                    } else if (payload.eventType === 'UPDATE') {
-                        setMembers((prev) => prev.map((member) => member.id === payload.new.id ? payload.new : member));
-                    } else if (payload.eventType === 'DELETE') {
-                        setMembers((prev) => prev.filter((member) => member.id !== payload.old.id));
-                    }
-                })
-                .subscribe();
         }
 
-        return () => {
-            if (channel) supabase.removeChannel(channel);
-        };
+        const interval = setInterval(() => {
+            if (activeTab === 'Members' || activeTab === 'Dashboard') {
+                fetchMembers();
+            }
+        }, 5000);
+
+        return () => clearInterval(interval);
     }, [activeTab]);
 
     // Fetch Active Sessions for Timers
     useEffect(() => {
         if (members.length > 0) {
             const fetchSessions = async () => {
-                const { data } = await supabase
-                    .from('activity_logs')
-                    .select('member_id, check_in_time')
-                    .is('check_out_time', null);
+                const logs = await getActiveSessionsAction();
 
-                if (data) {
+                if (logs) {
                     const sessionMap: Record<string, string> = {};
-                    data.forEach(log => {
+                    logs.forEach((log: any) => {
                         sessionMap[log.member_id] = log.check_in_time;
                     });
                     setActiveSessions(sessionMap);
@@ -383,40 +266,10 @@ export default function AdminDashboard() {
     // Admin Leaderboard Fetch
     useEffect(() => {
         if (activeTab === 'Leaderboard') {
-            async function fetchLeaderboard() {
+            async function fetchLeaderboardData() {
                 setLoadingLeaderboard(true);
                 try {
-                    // Reuse members state if available, or fetch
-                    let allMembers = members;
-                    if (members.length === 0) {
-                        const { data, error } = await supabase.from('members').select('id, full_name, plan, status');
-                        if (error) throw error;
-                        allMembers = data || [];
-                    }
-
-                    // Get all logs
-                    const { data: allLogs, error: logsError } = await supabase
-                        .from('activity_logs')
-                        .select('member_id, duration_minutes');
-
-                    if (logsError) throw logsError;
-
-                    // Calculate XP
-                    const xpMap: Record<string, number> = {};
-                    allLogs?.forEach(log => {
-                        if (log.duration_minutes) {
-                            xpMap[log.member_id] = (xpMap[log.member_id] || 0) + log.duration_minutes;
-                        }
-                    });
-
-                    // Combine and Sort
-                    const sortedLeaderboard = allMembers
-                        .map(m => ({
-                            ...m,
-                            xp: xpMap[m.id] || 0
-                        }))
-                        .sort((a: any, b: any) => b.xp - a.xp);
-
+                    const sortedLeaderboard = await getLeaderboard();
                     setLeaderboard(sortedLeaderboard);
                 } catch (e) {
                     console.error("Error fetching leaderboard", e);
@@ -424,15 +277,14 @@ export default function AdminDashboard() {
                     setLoadingLeaderboard(false);
                 }
             }
-            fetchLeaderboard();
+            fetchLeaderboardData();
         }
-    }, [activeTab, members]);
+    }, [activeTab]);
 
     async function fetchMembers() {
         setIsLoadingMembers(true);
         try {
-            const { data, error } = await supabase.from('members').select('*').order('created_at', { ascending: false });
-            if (error) throw error;
+            const data = await getAllMembers();
             setMembers(data || []);
         } catch (error) {
             console.error('Error fetching members:', error);
@@ -444,17 +296,13 @@ export default function AdminDashboard() {
 
     async function handleViewMember(member: any) {
         setViewingMember(member);
-        const { data: logs, error } = await supabase
-            .from('activity_logs')
-            .select('*')
-            .eq('member_id', member.id)
-            .order('check_in_time', { ascending: false });
+        const logs = await getMemberHistory(member.id);
 
         if (logs) {
             setViewingMemberLogs(logs);
             // Calculate stats
             const totalVisits = logs.length;
-            const totalMinutes = logs.reduce((acc, log) => acc + (log.duration_minutes || 0), 0);
+            const totalMinutes = logs.reduce((acc: any, log: any) => acc + (log.duration_minutes || 0), 0);
             setViewingStats({ totalVisits, totalMinutes });
         }
     }
@@ -463,8 +311,7 @@ export default function AdminDashboard() {
         if (!confirm("Are you sure you want to delete this member?")) return;
 
         try {
-            const { error } = await supabase.from('members').delete().eq('id', id);
-            if (error) throw error;
+            await deleteMemberAction(id);
             // Optimistic update
             setMembers(members.filter(m => m.id !== id));
         } catch (error) {
@@ -478,18 +325,13 @@ export default function AdminDashboard() {
         if (!editingMember) return;
 
         try {
-            const { error } = await supabase
-                .from('members')
-                .update({
-                    full_name: editingMember.full_name,
-                    email: editingMember.email,
-                    plan: editingMember.plan,
-                    status: editingMember.status,
-                    due_amount: editingMember.due_amount
-                })
-                .eq('id', editingMember.id);
-
-            if (error) throw error;
+            await updateMemberAction(editingMember.id, {
+                full_name: editingMember.full_name,
+                email: editingMember.email,
+                plan: editingMember.plan,
+                status: editingMember.status,
+                due_amount: editingMember.due_amount
+            });
 
             // Optimistic update
             setMembers(members.map(m => m.id === editingMember.id ? editingMember : m));
@@ -545,8 +387,8 @@ export default function AdminDashboard() {
 
     const quickApprove = async (id: string, currentPlan: string) => {
         try {
-            await supabase.from('members').update({ status: 'Active' }).eq('id', id);
-            // Realtime will handle the state update
+            await quickApproveAction(id, { status: 'Active' });
+            fetchMembers(); // manually handle state update
         } catch (e) {
             console.error(e);
             alert("Failed to approve");

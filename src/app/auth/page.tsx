@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { Dumbbell, ArrowRight } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, Suspense } from "react";
-import { supabase } from "@/lib/supabase";
+import { loginMember, registerMember } from "@/app/actions";
 
 export default function AuthPageWrapper() {
     return (
@@ -44,18 +44,13 @@ function AuthPage() {
                 }
 
                 // Member Login Check
-                const { data, error } = await supabase
-                    .from("members")
-                    .select("*")
-                    .eq("email", email)
-                    .eq("password", password)
-                    .maybeSingle();
+                const data = await loginMember(email, password);
 
-                if (error || !data) {
+                if (!data) {
                     setError("Invalid email or password.");
                 } else {
-                    if (data.status === 'Active') {
-                        localStorage.setItem("memberId", data.id);
+                    if (data.status === 'Active' || data.status === 'Active (In Gym)') {
+                        localStorage.setItem("memberId", data._id.toString());
                         router.push("/dashboard");
                     } else if (data.status === 'Pending') {
                         setError("Your account is pending admin approval.");
@@ -65,31 +60,23 @@ function AuthPage() {
                 }
             } else {
                 // Registration
-                const { error } = await supabase
-                    .from("members")
-                    .insert([
-                        {
-                            full_name: fullName,
-                            email: email,
-                            password: password, // For this demo we start with storing it here. In prod use Auth!
-                            phone: phone, // Assuming database might not have this column yet but we asked for it. 
-                            // Actually I didn't add phone column. Let's skip phone in DB insert for now or add it.
-                            // I'll skip phone in DB insert to avoid error, or just use it if I update DB.
-                            // To be safe I will just insert strict columns: full_name, email, password, plan, status
-                            // To be safe I will just insert strict columns: full_name, email, password, plan, status, due_amount
-                            plan: urlPlan || 'Monthly Plan', // Default plan
-                            status: 'Pending',
-                            due_amount: (urlPlan === 'Yearly Plan') ? 20000 : (urlPlan === '6-Month Plan') ? 12000 : 3000
-                        }
-                    ]);
-
-                if (error) {
-                    console.error("Signup error", error);
-                    setError("Failed to create account. Email might be already in use.");
-                } else {
-                    setSuccessMessage("Account created! Waiting for admin approval.");
-                    // Reset form or switch to login logic
-                    setIsLogin(true);
+                try {
+                const data = {
+                    full_name: fullName,
+                    email: email,
+                    password: password,
+                    phone: phone,
+                    plan: urlPlan || 'Monthly Plan',
+                    status: 'Pending',
+                    due_amount: (urlPlan === 'Yearly Plan') ? 20000 : (urlPlan === '6-Month Plan') ? 12000 : 3000
+                };
+                
+                await registerMember(data);
+                setSuccessMessage("Account created! Waiting for admin approval.");
+                // Reset form or switch to login logic
+                setIsLogin(true);
+                } catch (e: any) {
+                    setError(e.message || "Failed to create account. Email might be already in use.");
                 }
             }
         } catch (err) {

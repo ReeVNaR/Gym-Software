@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
+import { getMember, getMemberActivity, getMemberHistory, getLeaderboard } from "@/app/actions";
 import { motion } from "framer-motion";
 import { Dumbbell, Activity, Calendar, LogOut, X, Home, Trophy, User } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
@@ -52,82 +52,31 @@ export default function MemberDashboard() {
         }
 
         async function fetchMemberData() {
-            // Fetch Member Logic
-            const { data, error } = await supabase
-                .from("members")
-                .select("*")
-                .eq("id", memberId)
-                .single();
-
-            if (data) {
-                if (!data.status.startsWith("Active")) {
-                    // If status became inactive while viewing
-                    if (data.status !== 'Active') { // Allow 'Active (In Gym)'
-                        // Just warn, don't auto-logout immediately to avoid bad UX if it's just a transition
-                        // But if they are truly inactive (e.g. ban), maybe.
-                    }
+            try {
+                const data = await getMember(memberId as string);
+                if (data) {
+                    setMember(data);
+                    const activity = await getMemberActivity(memberId as string);
+                    const fullHistory = await getMemberHistory(memberId as string);
+                    if (fullHistory) setActivityHistory(fullHistory);
+                    setLastActivity(activity);
+                    setIsLoading(false);
+                } else {
+                    localStorage.removeItem("memberId");
+                    router.push("/auth");
                 }
-                setMember(data);
-
-                // Fetch latest activity or open activity
-                // Priority: Open session
-                let { data: activity } = await supabase
-                    .from('activity_logs')
-                    .select('*')
-                    .eq('member_id', memberId)
-                    .is('check_out_time', null)
-                    .maybeSingle();
-
-                if (!activity) {
-                    // If no open session, get latest history
-                    const { data: latest } = await supabase
-                        .from('activity_logs')
-                        .select('*')
-                        .eq('member_id', memberId)
-                        .order('check_in_time', { ascending: false })
-                        .limit(1)
-                        .maybeSingle();
-                    activity = latest;
-                }
-
-                // Fetch full history for calendar
-                const { data: fullHistory } = await supabase
-                    .from('activity_logs')
-                    .select('*')
-                    .eq('member_id', memberId)
-                    .order('check_in_time', { ascending: false });
-
-                if (fullHistory) setActivityHistory(fullHistory);
-
-                setLastActivity(activity);
-                setIsLoading(false);
-            } else {
-                localStorage.removeItem("memberId");
-                router.push("/auth");
+            } catch (error) {
+                console.error(error);
             }
         }
 
         fetchMemberData();
 
-        // Realtime Subscription
-        const channel = supabase
-            .channel('member-dashboard')
-            .on('postgres_changes',
-                { event: 'UPDATE', schema: 'public', table: 'members', filter: `id=eq.${memberId}` },
-                (payload) => {
-                    setMember(payload.new);
-                    // If status changed to In Gym, refetch activity to get the new log
-                    if (payload.new.status === 'Active (In Gym)') {
-                        setTimeout(fetchMemberData, 500); // Small delay to ensure log is created
-                    } else {
-                        fetchMemberData(); // Refresh to get the closed log
-                    }
-                }
-            )
-            .subscribe();
+        // Polling for updates
+        const interval = setInterval(() => fetchMemberData(), 5000);
 
         return () => {
-            supabase.removeChannel(channel);
+            clearInterval(interval);
         };
     }, [router]);
 
@@ -157,38 +106,8 @@ export default function MemberDashboard() {
             async function fetchLeaderboard() {
                 setLoadingLeaderboard(true);
                 try {
-                    // Get all members
-                    const { data: allMembers, error: membersError } = await supabase
-                        .from('members')
-                        .select('id, full_name');
-
-                    if (membersError) throw membersError;
-
-                    // Get all logs
-                    const { data: allLogs, error: logsError } = await supabase
-                        .from('activity_logs')
-                        .select('member_id, duration_minutes');
-
-                    if (logsError) throw logsError;
-
-                    // Calculate XP
-                    const xpMap: Record<string, number> = {};
-                    allLogs?.forEach(log => {
-                        if (log.duration_minutes) {
-                            xpMap[log.member_id] = (xpMap[log.member_id] || 0) + log.duration_minutes;
-                        }
-                    });
-
-                    // Combine and Sort
-                    const sortedLeaderboard = allMembers
-                        .map(m => ({
-                            ...m,
-                            xp: xpMap[m.id] || 0
-                        }))
-                        .sort((a, b) => b.xp - a.xp)
-                        .slice(0, 10); // Top 10
-
-                    setLeaderboard(sortedLeaderboard);
+                    const sortedLeaderboard = await getLeaderboard();
+                    setLeaderboard(sortedLeaderboard.slice(0, 10)); // Top 10
                 } catch (e) {
                     console.error("Error fetching leaderboard", e);
                 } finally {
